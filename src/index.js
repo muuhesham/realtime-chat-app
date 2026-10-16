@@ -1,26 +1,29 @@
 import express from 'express';
 import { Server } from 'socket.io';
 import { createServer } from 'http';
+import { corsOptions } from './cors.js';
+import cors from 'cors';
+import { PORT, HOST } from './env.js';
 
-const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || 'localhost';
 
 const app = express();
 app.use(express.json());
+app.use(cors(corsOptions));
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   // configration options [cors]
-  origin: "http://localhost:5173",
-  methods: ["GET", "POST"],
+  origin: corsOptions.origin,
+  methods: corsOptions.methods,
 });
 
 app.get('/health', (_req, res) => {
-    res.status(200).json({
-         status: 'ok',
-         timestamp: new Date().toISOString(),
-         uptime: process.uptime(),
-         memoryUsage: process.memoryUsage(),
-    });
+    const healthStatus = {
+      status: "ok",
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      memoryUsage: process.memoryUsage(),
+    };
+    res.status(200).json(healthStatus);
 });
 
 app.get('/', (_req, res) => {
