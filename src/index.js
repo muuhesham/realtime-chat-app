@@ -7,14 +7,14 @@ import { PORT, HOST } from './env.js';
 
 
 const app = express();
-app.use(express.json());
-app.use(cors(corsOptions));
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   // configration options [cors]
-  origin: corsOptions.origin,
-  methods: corsOptions.methods,
+  cors: corsOptions,
 });
+
+app.use(express.json());
+app.use(cors(corsOptions));
 
 app.get('/health', (_req, res) => {
     const healthStatus = {
@@ -42,23 +42,21 @@ app.get('/*splat', (req, res) => {
 io.on('connection', (socket) => {
     const userId = socket.id;
     console.log(`User connected: ${userId}`);
-    socket.on('chat-message', (data) => {
-        // if (!data || data.message || !data.username) {
-        //     console.error('Invalid message data received');
-        //     return;
-        // }
-        // io.to.emit('chat-message', {
+    socket.on('sendMessage', (data) => {
+        // console.log(`Received message from ${userId}: ${JSON.stringify(data)}`);
 
-        // });
-        // io.emit('chat-message', {
-        //     message: data.text,
-        //     username: data.username,
-        //     senderId: userId 
-        // });
-        console.log(`Received message from ${userId}: ${data}`);
+        const message = {
+            message: data.message,
+            username: data.username,
+            senderId: userId,
+            createdAt: new Date().toLocaleTimeString(),
+        };
+        // socket.emit('newMessage', message);
+        io.emit('newMessage', message);
+        // socket.broadcast.emit("newMessage", message);
     });
-    socket.on('disconnect', () => {
-        console.log(`User disconnected: ${userId}`);
+    socket.on('disconnect', (reason) => {
+        console.log(`User disconnected: ${userId} - Reason: ${reason}`);
     });
 });
 
