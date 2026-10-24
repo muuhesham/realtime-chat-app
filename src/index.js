@@ -8,7 +8,6 @@ import { PORT, HOST } from "./env.js";
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  // configration options [cors]
   cors: corsOptions,
 });
 
@@ -41,13 +40,10 @@ app.get("/*splat", (req, res) => {
 const messageSenders = new Map();
 const onlineUsers = new Map();
 
-// basic structure of socket.io server
 io.on("connection", (socket) => {
   const userId = socket.id;
   console.log(`User connected: ${userId}`);
   socket.on("sendMessage", (data) => {
-    // console.log(`Received message from ${userId}: ${JSON.stringify(data)}`);
-
     if(!data || typeof data?.message !== 'string') return;
     const msg = data.message.trim();
     if(!msg || msg.length > 500) return;
@@ -55,15 +51,12 @@ io.on("connection", (socket) => {
     const message = {
       messageId: Date.now() + Math.random(),
       message: msg,
-      // Use the server's socket-ID mapping; never trust a display name from the client.
       username: onlineUsers.get(userId) || "Guest",
       senderId: userId,
       createdAt: new Date().toLocaleTimeString(),
     };
     messageSenders.set(message.messageId, message.senderId);
-    // socket.emit('newMessage', message);
     io.emit("newMessage", message);
-    // socket.broadcast.emit("newMessage", message);
   });
 
   // online-offline
@@ -72,11 +65,9 @@ io.on("connection", (socket) => {
     const displayName = username.trim();
     const isNewUser = !onlineUsers.has(userId);
 
-    // Do not broadcast an unchanged name, but allow a socket ID to update its display name.
     if (onlineUsers.get(userId) === displayName) return;
     onlineUsers.set(userId, displayName);
 
-    // Only show join notifications for a new socket connection, not for a name update.
     if (isNewUser) {
       socket.emit('notification', {
           type: 'welcome',
@@ -98,19 +89,38 @@ io.on("connection", (socket) => {
   socket.on("typing", (data) => {
     const username = onlineUsers.get(userId);
     if (!username || typeof data?.message !== "string" || !data.message.trim()) return;
-    // send to all users without the sender
+    if (typeof data.recipientId === "string") {
+      if (!onlineUsers.has(data.recipientId) || data.recipientId === userId) return;
+      io.to(data.recipientId).emit("userTyping", {
+        username,
+        senderId: userId,
+        recipientId: data.recipientId,
+        isPrivate: true,
+      });
+      return;
+    }
     socket.broadcast.emit("userTyping", {
       username,
       senderId: userId,
+      isPrivate: false,
     });
   });
-  socket.on("stopTyping", () => {
+  socket.on("stopTyping", (data) => {
     const username = onlineUsers.get(userId);
     if (!username) return;
-    // send to all users without the sender
+    if (typeof data?.recipientId === "string") {
+      if (!onlineUsers.has(data.recipientId) || data.recipientId === userId) return;
+      io.to(data.recipientId).emit("userStopTyping", {
+        senderId: userId,
+        recipientId: data.recipientId,
+        isPrivate: true,
+      });
+      return;
+    }
     socket.broadcast.emit("userStopTyping", {
       username,
       senderId: userId,
+      isPrivate: false,
     });
   });
 
@@ -125,20 +135,21 @@ io.on("connection", (socket) => {
 
   // private msg
   socket.on('privateMessage', (data) => {
+    const recipientId = data?.recipientId || data?.reciverId;
     if (
       !data ||
-      typeof data.reciverId !== "string" ||
+      typeof recipientId !== "string" ||
       typeof data.message !== "string" ||
       !data.message.trim() ||
       data.message.trim().length > 500
     )
       return;
-    const {reciverId, message} = data;
+    const message = data.message;
 
-    if(!onlineUsers.has(reciverId)){
+    if(!onlineUsers.has(recipientId) || recipientId === userId){
      socket.emit("notification", {
        type: "error",
-       message: `User is offline`,
+       message: recipientId === userId ? "You cannot message yourself." : "User is offline",
      });
      return;
     }
@@ -151,8 +162,14 @@ io.on("connection", (socket) => {
        createdAt: new Date().toLocaleTimeString(),
      };
     
-     io.to(reciverId).emit('newPrivateMessage', privateMsg);
-     socket.emit('privateMessageSent', privateMsg);
+     io.to(recipientId).emit('newPrivateMessage', privateMsg);
+     // Include the recipient only in the sender's copy so the client can
+     // place the message in the correct direct-message conversation.
+     socket.emit('privateMessageSent', {
+       ...privateMsg,
+       recipientId,
+       recipientUsername: onlineUsers.get(recipientId),
+     });
      socket.emit('notification', {
         type: 'info',
         message: `Private Message send Successfully!`
