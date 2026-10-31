@@ -39,11 +39,20 @@ app.get("/*splat", (req, res) => {
 // memory
 const messageSenders = new Map();
 const onlineUsers = new Map();
+const userNames = new Set();
+const MAX_ONLINE_USERS = 30;
 
 io.on("connection", (socket) => {
   const userId = socket.id;
   console.log(`User connected: ${userId}`);
+  
+  // send msg
   socket.on("sendMessage", (data) => {
+    const username = onlineUsers.get(userId);
+    if (!username) {
+      socket.emit("joinError", "Please join the chat first");
+      return;
+    }
     if(!data || typeof data?.message !== 'string') return;
     const msg = data.message.trim();
     if(!msg || msg.length > 500) return;
@@ -51,7 +60,7 @@ io.on("connection", (socket) => {
     const message = {
       messageId: Date.now() + Math.random(),
       message: msg,
-      username: onlineUsers.get(userId) || "Guest",
+      username,
       senderId: userId,
       createdAt: new Date().toLocaleTimeString(),
     };
@@ -61,11 +70,32 @@ io.on("connection", (socket) => {
 
   // online-offline
   socket.on('joinChat', (username) =>{
-    if(typeof username !== 'string' || !username.trim()) return;
-    const displayName = username.trim();
-    const isNewUser = !onlineUsers.has(userId);
+    if(typeof username !== 'string') return;
+    const displayName = username.trim().toLowerCase();
 
-    if (onlineUsers.get(userId) === displayName) return;
+    if (
+      displayName.length > 10 ||
+      displayName.length === 0 ||
+      !/^[a-z0-9_-]{1,10}$/.test(displayName)
+    ) {
+      socket.emit("joinError", "Username must be valid name!");
+      return;
+    }
+    if (onlineUsers.get(userId)) {
+      socket.emit("joinError", "You already joined the chat!");
+      return;
+    }
+    if(userNames.has(displayName)){
+      socket.emit('joinError', 'This username is already taken!')
+      return;
+    }
+    if (onlineUsers.size >= MAX_ONLINE_USERS) {
+        socket.emit("joinError", "The chat is full right now");
+        return;
+    }
+    
+    const isNewUser = !onlineUsers.has(userId);
+    userNames.add(displayName);
     onlineUsers.set(userId, displayName);
 
     if (isNewUser) {
@@ -83,6 +113,9 @@ io.on("connection", (socket) => {
       senderId,
       username
     })));
+    socket.emit("joinSuccess", {
+      username: displayName
+    });
   });
 
   // Typing
@@ -131,10 +164,16 @@ io.on("connection", (socket) => {
     io.to(senderId).emit("messageRead", {
       messageId,
     });
+    messageSenders.delete(messageId);
   });
 
   // private msg
   socket.on('privateMessage', (data) => {
+    const username = onlineUsers.get(userId);
+    if (!username) {
+      socket.emit("joinError", "Please join the chat first");
+      return;
+    }
     const recipientId = data?.recipientId || data?.reciverId;
     if (
       !data ||
@@ -157,14 +196,13 @@ io.on("connection", (socket) => {
      const privateMsg = {
        messageId: Date.now() + Math.random(),
        senderId: userId,
-       username: onlineUsers.get(userId) || "Guest",
+       username,
        message: message.trim(),
        createdAt: new Date().toLocaleTimeString(),
      };
     
      io.to(recipientId).emit('newPrivateMessage', privateMsg);
-     // Include the recipient only in the sender's copy so the client can
-     // place the message in the correct direct-message conversation.
+
      socket.emit('privateMessageSent', {
        ...privateMsg,
        recipientId,
@@ -177,7 +215,31 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", (reason) => {
-    onlineUsers.delete(userId);
+    const username = onlineUsers.get(userId);
+    socket.broadcast.emit("userStopTyping", {
+      senderId: userId,
+      isPrivate: false,
+    });
+
+    for (const [recipientId] of io.sockets.sockets) {
+      io.to(recipientId).emit("userStopTyping", {
+        senderId: userId,
+        recipientId,
+        isPrivate: true,
+      });
+    }
+
+    for (const [messageId, senderId] of messageSenders) {
+      if (senderId === userId) {
+        messageSenders.delete(messageId);
+      }
+    }
+
+    if(username){
+      userNames.delete(username.toLowerCase());
+      onlineUsers.delete(userId);
+    }
+
     io.emit('onlineUser', Array.from(onlineUsers, ([senderId, username]) => ({
         senderId, username
     })));
