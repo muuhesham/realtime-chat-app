@@ -25,7 +25,7 @@ function App() {
   // Store the socket in a ref so one connection is reused across React renders.
   const socketRef = useRef(null);
   // Keep the current name available to Socket.IO callbacks without reconnecting.
-  const usernameRef = useRef(getStoredUsername() || "Guest");
+  const usernameRef = useRef(getStoredUsername());
   // Keep the delayed stop-typing action so it can be reset after each keystroke.
   const stopTypingTimerRef = useRef(null);
   // Keep the latest message visible as messages arrive.
@@ -34,7 +34,7 @@ function App() {
   const messageInputRef = useRef(null);
 
   // Keep only the state needed by a basic real-time chat screen.
-  const [username, setUsername] = useState(() => getStoredUsername() || "Guest");
+  const [username, setUsername] = useState(() => getStoredUsername());
   const [isEditingName, setIsEditingName] = useState(() => !getStoredUsername());
   const [messageText, setMessageText] = useState("");
   const [publicMessages, setPublicMessages] = useState([]);
@@ -62,7 +62,9 @@ function App() {
 
   const joinChat = () => {
     // Register the current client with the backend's online-users list.
-    socketRef.current?.emit("joinChat", usernameRef.current.trim() || "Guest");
+    if (usernameRef.current.trim()) {
+      socketRef.current?.emit("joinChat", usernameRef.current.trim());
+    }
   };
 
   const handleUsernameChange = (event) => {
@@ -71,8 +73,8 @@ function App() {
 
   const saveUsername = () => {
     const displayName = username.trim();
-    if (!displayName) {
-      toast.info("Please enter a name first.");
+    if (!/^[a-z0-9_-]{1,10}$/i.test(displayName)) {
+      toast.info("Use 1-10 letters, numbers, _ or -.");
       return;
     }
     usernameRef.current = displayName;
@@ -170,6 +172,11 @@ function App() {
     });
     socket.on("disconnect", () => setConnectionStatus("Disconnected"));
     socket.on("connect_error", () => setConnectionStatus("Connection failed"));
+    socket.on("joinError", (message) => toast.error(message));
+    socket.on("joinSuccess", ({ username }) => {
+      usernameRef.current = username;
+      toast.success(`Joined the chat as ${username}`);
+    });
 
     // Turn backend notification events into small toast messages in the UI.
     socket.on("notification", ({ type, message }) => {
@@ -181,7 +188,25 @@ function App() {
 
     // Support the server's join event and its disconnect update event.
     const updateOnlineUsers = (users) => {
-      setOnlineUsers(Array.isArray(users) ? users : []);
+      const nextUsers = Array.isArray(users) ? users : [];
+      setOnlineUsers(nextUsers);
+
+      const onlineIds = new Set(nextUsers.map((user) => user.senderId));
+      setPrivateChats((currentChats) => {
+        const nextChats = {};
+        Object.entries(currentChats).forEach(([recipientId, chat]) => {
+          if (onlineIds.has(recipientId)) {
+            nextChats[recipientId] = chat;
+          }
+        });
+        return nextChats;
+      });
+
+      setActiveConversationId((currentId) =>
+        currentId !== "general" && !onlineIds.has(currentId)
+          ? "general"
+          : currentId
+      );
     };
     socket.on("onlineUser", updateOnlineUsers);
     socket.on("onlineUsers", updateOnlineUsers);
@@ -195,11 +220,56 @@ function App() {
     // Keep the sender's copy in the conversation with its selected recipient.
     socket.on("privateMessageSent", (privateMessage) => {
       if (!privateMessage?.message) return;
+      if (privateMessage.clientMessageId) {
+        setPrivateChats((currentChats) => {
+          const recipientId = privateMessage.recipientId;
+          const chat = currentChats[recipientId];
+          if (!chat) return currentChats;
+
+          const hasPendingMessage = chat.messages.some(
+            (message) => message.clientMessageId === privateMessage.clientMessageId
+          );
+          return {
+            ...currentChats,
+            [recipientId]: {
+              ...chat,
+              messages: hasPendingMessage
+                ? chat.messages.map((message) =>
+                    message.clientMessageId === privateMessage.clientMessageId
+                      ? { ...privateMessage, id: message.id, isPrivate: true, pending: false }
+                      : message
+                  )
+                : [...chat.messages, { ...privateMessage, id: Date.now() + Math.random(), isPrivate: true }],
+            },
+          };
+        });
+        return;
+      }
       addPrivateMessage(
         privateMessage,
         privateMessage.recipientId,
         privateMessage.recipientUsername,
       );
+    });
+
+    socket.on("messageError", ({ clientMessageId, error }) => {
+      if (!clientMessageId) return;
+      setPublicMessages((currentMessages) =>
+        currentMessages.filter((message) => message.clientMessageId !== clientMessageId)
+      );
+      setPrivateChats((currentChats) => {
+        const nextChats = {};
+        Object.entries(currentChats).forEach(([recipientId, chat]) => {
+          nextChats[recipientId] = {
+            ...chat,
+            messages: chat.messages.filter(
+              (message) => message.clientMessageId !== clientMessageId
+            ),
+          };
+        });
+        return nextChats;
+      });
+      toast.error(error || "Message could not be sent");
     });
 
     // Mark the matching sent message as seen when its sender receives messageRead.
@@ -232,20 +302,36 @@ function App() {
       // Accept a plain string or a small message object from the backend.
       const normalizedMessage =
         typeof incomingMessage === "string"
-          ? { message: incomingMessage, username: "Guest" }
+          ? { message: incomingMessage, username: "Unknown user" }
           : {
               message: incomingMessage.message || "",
-              username: incomingMessage.username || "Guest",
+              username: incomingMessage.username || "Unknown user",
               messageId: incomingMessage.messageId,
               senderId: incomingMessage.senderId,
+              clientMessageId: incomingMessage.clientMessageId,
               createdAt: incomingMessage.createdAt,
             };
 
       if (normalizedMessage.message) {
-        setPublicMessages((currentMessages) => [
-          ...currentMessages,
-          { ...normalizedMessage, id: Date.now() + Math.random() },
-        ]);
+        setPublicMessages((currentMessages) => {
+          if (
+            normalizedMessage.senderId === socket.id &&
+            normalizedMessage.clientMessageId
+          ) {
+            return currentMessages.map((message) =>
+              message.clientMessageId === normalizedMessage.clientMessageId
+                ? { ...normalizedMessage, id: message.id, pending: false }
+                : message
+            );
+          }
+
+          return [
+            ...currentMessages.filter(
+              (message) => message.messageId !== normalizedMessage.messageId
+            ),
+            { ...normalizedMessage, id: Date.now() + Math.random() },
+          ];
+        });
 
         // Confirm receipt only for a message sent by another Socket.IO client.
         if (
@@ -277,16 +363,50 @@ function App() {
       recipientId: privateRecipientId || undefined,
     });
 
+    const temporaryId = `pending-${Date.now()}-${Math.random()}`;
+    const pendingMessage = {
+      message: trimmedMessage,
+      username: usernameRef.current,
+      senderId: socketRef.current.id,
+      messageId: temporaryId,
+      clientMessageId: temporaryId,
+      createdAt: new Date().toLocaleTimeString(),
+      pending: true,
+    };
+
     // Never fall back to the public room if the selected recipient goes offline.
     if (privateRecipientId) {
       socketRef.current.emit("privateMessage", {
         recipientId: privateRecipientId,
         message: trimmedMessage,
+        clientMessageId: temporaryId,
       });
     } else {
       socketRef.current.emit("sendMessage", {
         message: trimmedMessage,
+        clientMessageId: temporaryId,
       });
+    }
+
+    if (privateRecipientId) {
+      setPrivateChats((currentChats) => {
+        const currentChat = currentChats[privateRecipientId] || {
+          username: privateRecipient?.username,
+          messages: [],
+        };
+        return {
+          ...currentChats,
+          [privateRecipientId]: {
+            ...currentChat,
+            messages: [...currentChat.messages, { ...pendingMessage, isPrivate: true }],
+          },
+        };
+      });
+    } else {
+      setPublicMessages((currentMessages) => [
+        ...currentMessages,
+        { ...pendingMessage, id: temporaryId },
+      ]);
     }
     setMessageText("");
   };
@@ -387,7 +507,7 @@ function App() {
               disabled={!isEditingName}
               placeholder="Choose a display name"
               className={`min-w-0 flex-1 border-b bg-transparent px-1 py-1 outline-none focus:border-indigo-400 disabled:border-transparent disabled:font-semibold disabled:opacity-100 ${darkMode ? "border-slate-700 text-slate-100" : "border-slate-200 text-slate-800"}`}
-              maxLength={30}
+              maxLength={10}
             />
             {isEditingName ? <button type="button" onClick={saveUsername} className="shrink-0 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-700">Save</button> : <button type="button" onClick={() => setIsEditingName(true)} className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${darkMode ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-white text-slate-600 hover:bg-slate-100"}`}>Edit</button>}
           </label>
